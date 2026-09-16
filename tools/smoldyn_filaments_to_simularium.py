@@ -104,6 +104,61 @@ def generation_of(name, parents, cache):
     return gen
 
 
+PLANE_COLORS = ["#58606c", "#94a7fc", "#bbbb99", "#418463"]
+
+
+def parse_plane(spec):
+    """'NAME:x,y,z,dx,dy[:z1,t0,t1]' -> dict. Geometry order matches Smoldyn's
+    `panel rect <normal> x y z dx dy`, so a panel line can be transcribed
+    directly. The optional tail describes a linear ramp in z, held flat outside
+    [t0, t1] -- the same shape as a piston driven by a `set surface ... panel`
+    command."""
+    name, _, rest = spec.partition(":")
+    if not name or not rest:
+        raise SystemExit(f"--plane needs NAME:x,y,z,dx,dy — got {spec!r}")
+    geom, _, ramp = rest.partition(":")
+    try:
+        x, y, z, dx, dy = (float(v) for v in geom.split(","))
+    except ValueError:
+        raise SystemExit(f"--plane geometry must be 5 numbers x,y,z,dx,dy — got {geom!r}")
+    out = {"name": name, "x": x, "y": y, "z": z, "dx": dx, "dy": dy,
+           "z1": None, "t0": None, "t1": None}
+    if ramp:
+        try:
+            z1, t0, t1 = (float(v) for v in ramp.split(","))
+        except ValueError:
+            raise SystemExit(f"--plane ramp must be z1,t0,t1 — got {ramp!r}")
+        if t1 <= t0:
+            raise SystemExit(f"--plane ramp needs t1 > t0 — got {ramp!r}")
+        out.update(z1=z1, t0=t0, t1=t1)
+    return out
+
+
+def plane_nodes(pl, t):
+    """Rectangle outline (5 points, closed) at this plane's height at time t."""
+    z = pl["z"]
+    if pl["z1"] is not None:
+        frac = min(max((t - pl["t0"]) / (pl["t1"] - pl["t0"]), 0.0), 1.0)
+        z = pl["z"] + frac * (pl["z1"] - pl["z"])
+    x0, y0, x1, y1 = pl["x"], pl["y"], pl["x"] + pl["dx"], pl["y"] + pl["dy"]
+    return np.array([[x0, y0, z], [x1, y0, z], [x1, y1, z],
+                     [x0, y1, z], [x0, y0, z]], dtype=float)
+
+
+def inject_planes(frames, planes, args):
+    """Add one fiber agent per plane per frame, before centring and scaling so
+    the panels travel through the same transform as the filaments."""
+    for i, pl in enumerate(planes):
+        args._static_types.setdefault(
+            pl["name"], PLANE_COLORS[i % len(PLANE_COLORS)])
+    for t, recs in frames.items():
+        for pl in planes:
+            recs.append({"ftype": pl["name"], "name": f"__plane_{pl['name']}",
+                         "parent": "-", "capped": False,
+                         "nodes": plane_nodes(pl, t)})
+    return frames
+
+
 def type_name(rec, parents, args, cache):
     # Static scenery (e.g. a membrane drawn as grid fibers) keeps its own
     # filament-type name and color, outside the generation/capped schemes.
@@ -236,6 +291,16 @@ def main():
                    help="override the auto viewer scale factor")
     p.add_argument("--color-by", choices=["generation", "capped"],
                    default="generation")
+    p.add_argument("--plane", action="append", default=[], metavar="SPEC",
+                   help="draw a Smoldyn rect panel as a wireframe outline. "
+                        "SPEC is NAME:x,y,z,dx,dy for a static panel (same "
+                        "argument order as Smoldyn's `panel rect`), with an "
+                        "optional :z1,t0,t1 suffix for a panel that moves "
+                        "linearly from z to z1 over t0..t1 and is held outside "
+                        "that window. Repeatable. Example: a floor at z=-0.1 "
+                        "and a piston descending 0.15 -> -0.03 over t 2..3 is "
+                        "--plane 'floor:-0.5,-0.5,-0.1,1,1' "
+                        "--plane 'piston:-0.5,-0.5,0.15,1,1:-0.03,2,3'")
     p.add_argument("--stride", type=int, default=1, metavar="N",
                    help="keep every Nth frame (default 1 = all). Conversion cost "
                         "scales with frames x filaments, so a long branching run "
@@ -271,6 +336,13 @@ def main():
                              if i % args.stride == 0)
     if not frames:
         raise SystemExit("no frames left after --stride/--max-time filtering")
+    if args.plane:
+        planes = [parse_plane(s) for s in args.plane]
+        frames = inject_planes(frames, planes, args)
+        print(f"drew {len(planes)} plane(s): "
+              + ", ".join(p["name"] + (" (moving)" if p["z1"] is not None else "")
+                          for p in planes))
+
     agent_frames = sum(len(r) for r in frames.values())
     print(f"{len(frames)} frames, {agent_frames} agent-frames "
           f"(t = {min(frames):g}..{max(frames):g})")

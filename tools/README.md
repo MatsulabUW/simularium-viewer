@@ -65,6 +65,45 @@ Useful options:
 
 Run with `-h` for the full list.
 
+### Showing the boundaries
+
+The viewer draws a wireframe bounding box from `box_size` automatically, but that
+is just the simulation volume. The surfaces that actually do the physics — an NPF
+membrane, a confining chamber, a piston — are Smoldyn `panel` definitions and are
+not in `printFilaments` output at all, so they have to be declared.
+
+`--plane` draws a rect panel as a wireframe outline. The geometry arguments are in
+the same order as Smoldyn's `panel rect`, so you can transcribe a panel line
+straight out of the config:
+
+```
+# in the Smoldyn config
+panel rect +2 -0.5 -0.5 -0.1  1 1 floor
+panel rect -2 -0.5 -0.5 0.15  1 1 ceiling
+cmd i 2 3 0.002 set surface chamber panel rect -2 -0.5 -0.5 0.15-0.18*(time-2) 1 1 ceiling
+```
+
+```bash
+python tools/smoldyn_filaments_to_simularium.py baseline_frames.txt baseline \
+    --stride 10 \
+    --plane 'membrane:-0.5,-0.5,-0.1,1,1' \
+    --plane 'piston:-0.5,-0.5,0.15,1,1:-0.03,2,3'
+```
+
+- `NAME:x,y,z,dx,dy` — a static panel.
+- `:z1,t0,t1` appended — the panel moves linearly from `z` to `z1` over `t0..t1`
+  and is held flat outside that window. That matches a piston driven by a
+  `set surface ... panel rect` command with `time` in the expression.
+
+Each plane becomes its own agent type with its own colour and visibility toggle,
+so you can hide the piston to see inside the network. Planes are injected before
+centring and scaling, so they travel through the same transform as the filaments
+and stay registered with them.
+
+**The ramp is declared, not read from the config.** Nothing checks it against the
+`cmd` line that actually moved the panel — if you change the schedule in the
+config, change it here too, or the piston will be drawn in the wrong place.
+
 ### Why `--stride` matters
 
 Conversion cost scales with **agent-frames** = frames × filaments per frame, and
